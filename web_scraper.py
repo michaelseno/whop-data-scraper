@@ -1,9 +1,11 @@
+import time
+
 from bs4 import BeautifulSoup
 import requests
 import logging
 import concurrent.futures
 
-logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.DEBUG)
+logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
 URL = "https://whop.com"
 ITEM_CLASS = "hover:bg-whop-hover border-whop-stroke group flex cursor-pointer flex-col items-stretch gap-2 overflow-x-hidden border-0 border-b border-solid p-5 transition md:flex-row md:items-center md:gap-5 md:rounded-lg md:border-b-0 md:p-4"
@@ -11,7 +13,7 @@ ITEM_TITLE = "subtitle1 overflow-x-hidden text-ellipsis whitespace-nowrap"
 CAT_CLASS = "subtitle3 text-whop-dark-gray hover:text-whop-off-black whitespace-nowrap py-3.5 transition"
 LP_CLASS = "subtitle flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded-md border-2 transition border-transparent hover:bg-whop-hover hover:border-whop-hover active:border-whop-hover-press active:bg-whop-hover-press"
 ONE_CLASS = "subtitle flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded-md border-2 transition border-black"
-THREAD = 10
+THREAD = 15
 
 
 class WebScraper:
@@ -20,13 +22,25 @@ class WebScraper:
         self.listing_list = []
         self.categories = []
         self.cat_page_list = []
+        self.gathered_info_list = []
         self.get_html_data()
 
     @staticmethod
     def get_request_data(req_url):
-        response = requests.get(url=req_url)
-        logging.info(f'Generating response from get request: {req_url}')
-        return response.text
+        success = False
+        retries = 0
+        while not success and retries < 3:
+            try:
+                response = requests.get(url=req_url)
+                response.raise_for_status()
+                logging.info(f'Generating response from get request: {req_url}')
+                success = True
+                return response.text
+            except Exception as e:
+                logging.error(f'Request Failed with Exception: {e}')
+                logging.error(f'Retrying request...')
+                time.sleep(10)
+                retries += 1
 
     @staticmethod
     def get_soup_data(data):
@@ -97,7 +111,47 @@ class WebScraper:
             list_url.append(f"{URL}{cat}")
         return list_url
 
+    def scrape_info_in_page(self, url):
+        pl_list = []
+        it_list = []
+        resp = self.get_request_data(req_url=url)
+        soup = self.get_soup_data(resp)
+        name = soup.find("div", class_="display3 text-whop-black").getText()
+        genre = soup.find("div", class_="text-whop-dark-gray text-text3").getText()
+        contact_info = soup.find_all("a", class_="text-whop-field-highlight flex cursor-pointer items-center gap-0.5")
+        platform = soup.find_all("div", class_="text-whop-gray flex items-center gap-1.5")
+        for pl in platform:
+            pl_list.append(pl.getText())
+
+        for it in contact_info:
+            it_list.append(it.get("href"))
+
+        res = {}
+        for key in pl_list:
+            for value in it_list:
+                res[key] = value
+                it_list.remove(value)
+                break
+
+        fin_dc = {
+            "url": url,
+            "name": name,
+            "genre": genre,
+            "cont": res
+        }
+
+        self.gathered_info_list.append(fin_dc)
+
+    def merge_data(self):
+        lst = []
+        for url in self.listing_list:
+            lst.append(url['url'])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD) as executor:
+            executor.map(self.scrape_info_in_page, lst)
+
     def get_html_data(self):
+        page_url_list = []
         soup = self.get_soup_data(self.data)
         categories = soup.find_all("a", class_=CAT_CLASS)
         logging.info(f'Getting all categories in the page')
@@ -105,24 +159,21 @@ class WebScraper:
             logging.info(f'Extracting `href` from {category.getText()}')
             self.categories.append(category.get('href'))
 
-        url_list = self.generate_url(self.categories)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD) as executor:
-            executor.map(self.scrape_category_data, url_list)
+        cat_url_list = self.generate_url(self.categories)
+        for cat_url in cat_url_list:
+            self.scrape_category_data(cat_url)
 
         logging.info(f'Generating request URL and appending it to URL List')
         for item in self.cat_page_list:
             total_page_count = item["total_page"]
             category = item["category"]
             for page_count in range(1, total_page_count + 1):
-                url = f"{URL}{category}page/{page_count}/"
-                logging.info(f'Appending {url} to url list')
+                page_url = f"{category}page/{page_count}/"
+                logging.info(f'Appending {page_url} to url list')
 
-                url_list.append(url)
-
-        print(f"URL_LIST_COUNT: {len(url_list)}")
+                page_url_list.append(page_url)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD) as executor:
-            executor.map(self.scrape_data, url_list)
+            executor.map(self.scrape_data, page_url_list)
 
         logging.info(f'Extraction Completed.')
